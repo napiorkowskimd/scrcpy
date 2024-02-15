@@ -143,7 +143,6 @@ run_v4l2_sink(void *data) {
 
 static bool
 sc_v4l2_sink_open(struct sc_v4l2_sink *vs, const AVCodecContext *ctx) {
-    assert(ctx->pix_fmt == AV_PIX_FMT_YUV420P);
     (void) ctx;
 
     bool ok = sc_frame_buffer_init(&vs->fb);

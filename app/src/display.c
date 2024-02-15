@@ -1,7 +1,9 @@
 #include "display.h"
 
 #include <assert.h>
+#include <libavutil/pixfmt.h>
 
+#include "format_converter.h"
 #include "util/log.h"
 
 bool
@@ -80,6 +82,7 @@ sc_display_destroy(struct sc_display *display) {
         SDL_DestroyTexture(display->texture);
     }
     SDL_DestroyRenderer(display->renderer);
+    sc_format_converter_reset(&display->fmt_convert);
 }
 
 static SDL_Texture *
@@ -197,7 +200,15 @@ sc_display_set_texture_size(struct sc_display *display, struct sc_size size) {
 
 static bool
 sc_display_update_texture_internal(struct sc_display *display,
-                                   const AVFrame *frame) {
+                                   const AVFrame *frame) {;
+    if(!sc_format_converter_ready(&display->fmt_convert, frame)) {
+        sc_format_converter_reset(&display->fmt_convert);
+        sc_format_converter_init(&display->fmt_convert,
+            frame->width, frame->height,
+            frame->format, AV_PIX_FMT_YUV420P);
+    }
+
+    frame = sc_format_converter_convert(&display->fmt_convert, frame);
     int ret = SDL_UpdateYUVTexture(display->texture, NULL,
                                    frame->data[0], frame->linesize[0],
                                    frame->data[1], frame->linesize[1],

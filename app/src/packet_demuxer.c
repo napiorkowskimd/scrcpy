@@ -1,26 +1,28 @@
-#include "demuxer.h"
+#include "packet_demuxer.h"
 
 #include <assert.h>
+#include <libavcodec/avcodec.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/time.h>
+#include <stdbool.h>
 #include <unistd.h>
 
-#include "decoder.h"
 #include "events.h"
-#include "packet_merger.h"
-#include "recorder.h"
+#include "trait/demuxer.h"
 #include "util/binary.h"
 #include "util/log.h"
 
+#define DOWNCAST(SINK) container_of(SINK, struct sc_packet_demuxer, demuxer)
+
 #define SC_PACKET_HEADER_SIZE 12
 
-#define SC_PACKET_FLAG_CONFIG    (UINT64_C(1) << 63)
+#define SC_PACKET_FLAG_CONFIG (UINT64_C(1) << 63)
 #define SC_PACKET_FLAG_KEY_FRAME (UINT64_C(1) << 62)
 
 #define SC_PACKET_PTS_MASK (SC_PACKET_FLAG_KEY_FRAME - 1)
 
 static enum AVCodecID
-sc_demuxer_to_avcodec_id(uint32_t codec_id) {
+sc_packet_demuxer_to_avcodec_id(uint32_t codec_id) {
 #define SC_CODEC_ID_H264 UINT32_C(0x68323634) // "h264" in ASCII
 #define SC_CODEC_ID_H265 UINT32_C(0x68323635) // "h265" in ASCII
 #define SC_CODEC_ID_AV1 UINT32_C(0x00617631) // "av1" in ASCII
@@ -55,7 +57,8 @@ sc_demuxer_to_avcodec_id(uint32_t codec_id) {
 }
 
 static bool
-sc_demuxer_recv_codec_id(struct sc_demuxer *demuxer, uint32_t *codec_id) {
+sc_packet_demuxer_recv_codec_id(struct sc_packet_demuxer *demuxer,
+                                uint32_t *codec_id) {
     uint8_t data[4];
     ssize_t r = net_recv_all(demuxer->socket, data, 4);
     if (r < 4) {
@@ -67,8 +70,8 @@ sc_demuxer_recv_codec_id(struct sc_demuxer *demuxer, uint32_t *codec_id) {
 }
 
 static bool
-sc_demuxer_recv_video_size(struct sc_demuxer *demuxer, uint32_t *width,
-                           uint32_t *height) {
+sc_packet_demuxer_recv_video_size(struct sc_packet_demuxer *demuxer,
+                                  uint32_t *width, uint32_t *height) {
     uint8_t data[8];
     ssize_t r = net_recv_all(demuxer->socket, data, 8);
     if (r < 8) {
@@ -80,8 +83,9 @@ sc_demuxer_recv_video_size(struct sc_demuxer *demuxer, uint32_t *width,
     return true;
 }
 
-static bool
-sc_demuxer_recv_packet(struct sc_demuxer *demuxer, AVPacket *packet) {
+bool
+sc_packet_demuxer_get_frame(struct sc_demuxer *base_demuxer,
+                            AVPacket *packet) {
     // The video and audio streams contain a sequence of raw packets (as
     // provided by MediaCodec), each prefixed with a "meta" header.
     //
@@ -101,7 +105,7 @@ sc_demuxer_recv_packet(struct sc_demuxer *demuxer, AVPacket *packet) {
     // ||                                PTS
     // | `- key frame
     //  `-- config packet
-
+    struct sc_packet_demuxer *demuxer = DOWNCAST(base_demuxer);
     uint8_t header[SC_PACKET_HEADER_SIZE];
     ssize_t r = net_recv_all(demuxer->socket, header, SC_PACKET_HEADER_SIZE);
     if (r < SC_PACKET_HEADER_SIZE) {
@@ -137,15 +141,14 @@ sc_demuxer_recv_packet(struct sc_demuxer *demuxer, AVPacket *packet) {
     return true;
 }
 
-static int
-run_demuxer(void *data) {
-    struct sc_demuxer *demuxer = data;
-
-    // Flag to report end-of-stream (i.e. device disconnected)
+enum sc_demuxer_status
+sc_packet_demuxer_configure(struct sc_demuxer *demuxer, AVCodecContext **out_context) {
+    struct sc_packet_demuxer *packet_demuxer = DOWNCAST(demuxer);
     enum sc_demuxer_status status = SC_DEMUXER_STATUS_ERROR;
+    *out_context = NULL;
 
     uint32_t raw_codec_id;
-    bool ok = sc_demuxer_recv_codec_id(demuxer, &raw_codec_id);
+    bool ok = sc_packet_demuxer_recv_codec_id(packet_demuxer, &raw_codec_id);
     if (!ok) {
         LOGE("Demuxer '%s': stream disabled due to connection error",
              demuxer->name);
@@ -166,11 +169,11 @@ run_demuxer(void *data) {
         goto end;
     }
 
-    enum AVCodecID codec_id = sc_demuxer_to_avcodec_id(raw_codec_id);
+    enum AVCodecID codec_id = sc_packet_demuxer_to_avcodec_id(raw_codec_id);
     if (codec_id == AV_CODEC_ID_NONE) {
         LOGE("Demuxer '%s': stream disabled due to unsupported codec",
              demuxer->name);
-        sc_packet_source_sinks_disable(&demuxer->packet_source);
+        sc_packet_source_sinks_disable(&packet_demuxer->demuxer.packet_source);
         goto end;
     }
 
@@ -178,7 +181,7 @@ run_demuxer(void *data) {
     if (!codec) {
         LOGE("Demuxer '%s': stream disabled due to missing decoder",
              demuxer->name);
-        sc_packet_source_sinks_disable(&demuxer->packet_source);
+        sc_packet_source_sinks_disable(&packet_demuxer->demuxer.packet_source);
         goto end;
     }
 
@@ -193,9 +196,9 @@ run_demuxer(void *data) {
     if (codec->type == AVMEDIA_TYPE_VIDEO) {
         uint32_t width;
         uint32_t height;
-        ok = sc_demuxer_recv_video_size(demuxer, &width, &height);
+        ok = sc_packet_demuxer_recv_video_size(packet_demuxer, &width, &height);
         if (!ok) {
-            goto finally_free_context;
+            goto error_free_context;
         }
 
         codec_ctx->width = width;
@@ -219,102 +222,36 @@ run_demuxer(void *data) {
 
     if (avcodec_open2(codec_ctx, codec, NULL) < 0) {
         LOGE("Demuxer '%s': could not open codec", demuxer->name);
-        goto finally_free_context;
+        goto error_free_context;
     }
 
-    if (!sc_packet_source_sinks_open(&demuxer->packet_source, codec_ctx)) {
-        goto finally_free_context;
-    }
+    status = SC_DEMUXER_STATUS_OK;
+    *out_context = codec_ctx;
+    return status;
 
-    // Config packets must be merged with the next non-config packet only for
-    // H.26x
-    bool must_merge_config_packet = raw_codec_id == SC_CODEC_ID_H264
-                                 || raw_codec_id == SC_CODEC_ID_H265;
-
-    struct sc_packet_merger merger;
-
-    if (must_merge_config_packet) {
-        sc_packet_merger_init(&merger);
-    }
-
-    AVPacket *packet = av_packet_alloc();
-    if (!packet) {
-        LOG_OOM();
-        goto finally_close_sinks;
-    }
-
-    for (;;) {
-        bool ok = sc_demuxer_recv_packet(demuxer, packet);
-        if (!ok) {
-            // end of stream
-            status = SC_DEMUXER_STATUS_EOS;
-            break;
-        }
-
-        if (must_merge_config_packet) {
-            // Prepend any config packet to the next media packet
-            ok = sc_packet_merger_merge(&merger, packet);
-            if (!ok) {
-                av_packet_unref(packet);
-                break;
-            }
-        }
-
-        ok = sc_packet_source_sinks_push(&demuxer->packet_source, packet);
-        av_packet_unref(packet);
-        if (!ok) {
-            // The sink already logged its concrete error
-            break;
-        }
-    }
-
-    LOGD("Demuxer '%s': end of frames", demuxer->name);
-
-    if (must_merge_config_packet) {
-        sc_packet_merger_destroy(&merger);
-    }
-
-    av_packet_free(&packet);
-finally_close_sinks:
-    sc_packet_source_sinks_close(&demuxer->packet_source);
-finally_free_context:
+error_free_context:
     // This also calls avcodec_close() internally
     avcodec_free_context(&codec_ctx);
 end:
-    demuxer->cbs->on_ended(demuxer, status, demuxer->cbs_userdata);
-
-    return 0;
+    return status;
 }
 
+
 void
-sc_demuxer_init(struct sc_demuxer *demuxer, const char *name, sc_socket socket,
-                const struct sc_demuxer_callbacks *cbs, void *cbs_userdata) {
+sc_packet_demuxer_init(struct sc_packet_demuxer *packet_demuxer,
+                       const char *name, sc_socket socket,
+                       const struct sc_demuxer_callbacks *cbs,
+                       void *cbs_userdata) {
     assert(socket != SC_SOCKET_NONE);
 
-    demuxer->name = name; // statically allocated
-    demuxer->socket = socket;
-    sc_packet_source_init(&demuxer->packet_source);
-
+    static const struct sc_demuxer_ops ops = { .configure = sc_packet_demuxer_configure,
+                                               .get_frame = sc_packet_demuxer_get_frame };
+    packet_demuxer->demuxer.ops = &ops;
+    packet_demuxer->demuxer.name = name; // statically allocated
+    sc_packet_source_init(&packet_demuxer->demuxer.packet_source);
     assert(cbs && cbs->on_ended);
+    packet_demuxer->demuxer.cbs = cbs;
+    packet_demuxer->demuxer.cbs_userdata = cbs_userdata;
 
-    demuxer->cbs = cbs;
-    demuxer->cbs_userdata = cbs_userdata;
-}
-
-bool
-sc_demuxer_start(struct sc_demuxer *demuxer) {
-    LOGD("Demuxer '%s': starting thread", demuxer->name);
-
-    bool ok = sc_thread_create(&demuxer->thread, run_demuxer, "scrcpy-demuxer",
-                               demuxer);
-    if (!ok) {
-        LOGE("Demuxer '%s': could not start thread", demuxer->name);
-        return false;
-    }
-    return true;
-}
-
-void
-sc_demuxer_join(struct sc_demuxer *demuxer) {
-    sc_thread_join(&demuxer->thread, NULL);
+    packet_demuxer->socket = socket;
 }

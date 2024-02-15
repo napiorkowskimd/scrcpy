@@ -8,6 +8,7 @@
 #include <SDL2/SDL.h>
 
 #include "coords.h"
+#include "format_converter.h"
 #include "opengl.h"
 #include "options.h"
 
@@ -25,6 +26,7 @@ struct sc_display {
 #endif
 
     bool mipmaps;
+    struct sc_format_converter fmt_convert;
 
     struct {
 #define SC_DISPLAY_PENDING_FLAG_SIZE 1

@@ -93,6 +93,8 @@ enum {
     OPT_DISPLAY_ORIENTATION,
     OPT_RECORD_ORIENTATION,
     OPT_ORIENTATION,
+    OPT_SIDEBAND_VIDEO,
+    OPT_SIDEBAND_OPTIONS
 };
 
 struct sc_option {
@@ -837,6 +839,18 @@ static const struct sc_option options[] = {
         .text = "Set the initial window height.\n"
                 "Default is 0 (automatic).",
     },
+    {
+        .longopt_id = OPT_SIDEBAND_VIDEO,
+        .longopt = "sideband-video",
+        .argdesc = "value",
+        .text = "Use specific video source instad of capturing the device screen"
+    },
+    {
+        .longopt_id = OPT_SIDEBAND_OPTIONS,
+        .longopt = "sideband-options",
+        .argdesc = "value",
+        .text = "Options to pass to libav when using sideband video"
+    }
 };
 
 static const struct sc_shortcut shortcuts[] = {
@@ -2355,6 +2369,12 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
             case OPT_CAMERA_HIGH_SPEED:
                 opts->camera_high_speed = true;
                 break;
+            case OPT_SIDEBAND_VIDEO:
+                opts->sideband_video = optarg;
+                break;
+            case OPT_SIDEBAND_OPTIONS:
+                opts->sideband_video_opts = optarg;
+                break;
             default:
                 // getopt prints the error message on stderr
                 return false;
@@ -2505,11 +2525,11 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
 
     if (opts->audio && opts->audio_source == SC_AUDIO_SOURCE_AUTO) {
         // Select the audio source according to the video source
-        if (opts->video_source == SC_VIDEO_SOURCE_DISPLAY) {
-            opts->audio_source = SC_AUDIO_SOURCE_OUTPUT;
-        } else {
+        if (opts->video_source == SC_VIDEO_SOURCE_CAMERA) {
             opts->audio_source = SC_AUDIO_SOURCE_MIC;
             LOGI("Camera video source: microphone audio source selected");
+        } else{
+            opts->audio_source = SC_AUDIO_SOURCE_OUTPUT;
         }
     }
 

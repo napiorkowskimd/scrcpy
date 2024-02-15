@@ -14,10 +14,11 @@
 #endif
 
 #include "audio_player.h"
+#include "av_demuxer.h"
 #include "controller.h"
 #include "decoder.h"
 #include "delay_buffer.h"
-#include "demuxer.h"
+#include "packet_demuxer.h"
 #include "events.h"
 #include "file_pusher.h"
 #include "keyboard_inject.h"
@@ -44,8 +45,11 @@ struct scrcpy {
     struct sc_server server;
     struct sc_screen screen;
     struct sc_audio_player audio_player;
-    struct sc_demuxer video_demuxer;
-    struct sc_demuxer audio_demuxer;
+    struct sc_av_demuxer av_demuxer;
+    struct sc_packet_demuxer video_packet_demuxer;
+    struct sc_packet_demuxer audio_packet_demuxer;
+    struct sc_demuxer* video_demuxer;
+    struct sc_demuxer* audio_demuxer;
     struct sc_decoder video_decoder;
     struct sc_decoder audio_decoder;
     struct sc_recorder recorder;
@@ -365,7 +369,7 @@ scrcpy(struct scrcpy_options *options) {
         .lock_video_orientation = options->lock_video_orientation,
         .control = options->control,
         .display_id = options->display_id,
-        .video = options->video,
+        .video = options->video && !options->sideband_video,
         .audio = options->audio,
         .show_touches = options->show_touches,
         .stay_awake = options->stay_awake,
@@ -478,20 +482,28 @@ scrcpy(struct scrcpy_options *options) {
         file_pusher_initialized = true;
     }
 
-    if (options->video) {
-        static const struct sc_demuxer_callbacks video_demuxer_cbs = {
-            .on_ended = sc_video_demuxer_on_ended,
-        };
-        sc_demuxer_init(&s->video_demuxer, "video", s->server.video_socket,
+    static const struct sc_demuxer_callbacks video_demuxer_cbs = {
+        .on_ended = sc_video_demuxer_on_ended,
+    };
+
+    if (options->sideband_video) {
+        sc_av_demuxer_init(&s->av_demuxer, options->sideband_video,
+                options->sideband_video_opts,
+                &video_demuxer_cbs, NULL);
+        s->video_demuxer = &s->av_demuxer.demuxer;
+    } else if (options->video) {
+        sc_packet_demuxer_init(&s->video_packet_demuxer, "video", s->server.video_socket,
                         &video_demuxer_cbs, NULL);
+        s->video_demuxer = &s->video_packet_demuxer.demuxer;
     }
 
     if (options->audio) {
         static const struct sc_demuxer_callbacks audio_demuxer_cbs = {
             .on_ended = sc_audio_demuxer_on_ended,
         };
-        sc_demuxer_init(&s->audio_demuxer, "audio", s->server.audio_socket,
+        sc_packet_demuxer_init(&s->audio_packet_demuxer, "audio", s->server.audio_socket,
                         &audio_demuxer_cbs, options);
+        s->audio_demuxer = &s->audio_packet_demuxer.demuxer;
     }
 
     bool needs_video_decoder = options->video_playback;
@@ -501,12 +513,12 @@ scrcpy(struct scrcpy_options *options) {
 #endif
     if (needs_video_decoder) {
         sc_decoder_init(&s->video_decoder, "video");
-        sc_packet_source_add_sink(&s->video_demuxer.packet_source,
+        sc_packet_source_add_sink(&s->video_demuxer->packet_source,
                                   &s->video_decoder.packet_sink);
     }
     if (needs_audio_decoder) {
         sc_decoder_init(&s->audio_decoder, "audio");
-        sc_packet_source_add_sink(&s->audio_demuxer.packet_source,
+        sc_packet_source_add_sink(&s->audio_demuxer->packet_source,
                                   &s->audio_decoder.packet_sink);
     }
 
@@ -527,12 +539,12 @@ scrcpy(struct scrcpy_options *options) {
         }
         recorder_started = true;
 
-        if (options->video) {
-            sc_packet_source_add_sink(&s->video_demuxer.packet_source,
+        if (options->video || options->sideband_video) {
+            sc_packet_source_add_sink(&s->video_demuxer->packet_source,
                                       &s->recorder.video_packet_sink);
         }
         if (options->audio) {
-            sc_packet_source_add_sink(&s->audio_demuxer.packet_source,
+            sc_packet_source_add_sink(&s->audio_demuxer->packet_source,
                                       &s->recorder.audio_packet_sink);
         }
     }
@@ -752,15 +764,15 @@ aoa_hid_end:
     // Now that the header values have been consumed, the socket(s) will
     // receive the stream(s). Start the demuxer(s).
 
-    if (options->video) {
-        if (!sc_demuxer_start(&s->video_demuxer)) {
+    if (options->video || options->sideband_video) {
+        if (!sc_demuxer_start(s->video_demuxer)) {
             goto end;
         }
         video_demuxer_started = true;
     }
 
     if (options->audio) {
-        if (!sc_demuxer_start(&s->audio_demuxer)) {
+        if (!sc_demuxer_start(s->audio_demuxer)) {
             goto end;
         }
         audio_demuxer_started = true;
@@ -856,11 +868,11 @@ end:
     // now that the sockets are shutdown, the demuxer and controller are
     // interrupted, we can join them
     if (video_demuxer_started) {
-        sc_demuxer_join(&s->video_demuxer);
+        sc_demuxer_join(s->video_demuxer);
     }
 
     if (audio_demuxer_started) {
-        sc_demuxer_join(&s->audio_demuxer);
+        sc_demuxer_join(s->audio_demuxer);
     }
 
 #ifdef HAVE_V4L2
