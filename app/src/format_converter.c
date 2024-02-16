@@ -49,7 +49,7 @@ bool sc_format_converter_ready(struct sc_format_converter *converter,
 
 AVFrame *sc_format_converter_convert(struct sc_format_converter *converter,
                                      const AVFrame *src) {
-  sws_scale(converter->ctx, (const uint8_t *const *)src->data, src->linesize, 0, src->height,
-            converter->dst_frame->data, converter->dst_frame->linesize);
+  sws_scale(converter->ctx, (const uint8_t *const *)src->data, src->linesize,
+  0, src->height, converter->dst_frame->data, converter->dst_frame->linesize);
   return converter->dst_frame;
 }

@@ -369,7 +369,7 @@ scrcpy(struct scrcpy_options *options) {
         .lock_video_orientation = options->lock_video_orientation,
         .control = options->control,
         .display_id = options->display_id,
-        .video = options->video && !options->sideband_video,
+        .video = options->video && (options->video_source != SC_VIDEO_SOURCE_PATH),
         .audio = options->audio,
         .show_touches = options->show_touches,
         .stay_awake = options->stay_awake,
@@ -482,19 +482,20 @@ scrcpy(struct scrcpy_options *options) {
         file_pusher_initialized = true;
     }
 
+    if (options->video) {
     static const struct sc_demuxer_callbacks video_demuxer_cbs = {
         .on_ended = sc_video_demuxer_on_ended,
     };
-
-    if (options->sideband_video) {
-        sc_av_demuxer_init(&s->av_demuxer, options->sideband_video,
-                options->sideband_video_opts,
+        if (options->video_source == SC_VIDEO_SOURCE_PATH) {
+            sc_av_demuxer_init(&s->av_demuxer, options->video_source_path,
+                    options->video_source_options,
                 &video_demuxer_cbs, NULL);
         s->video_demuxer = &s->av_demuxer.demuxer;
-    } else if (options->video) {
+        } else {
         sc_packet_demuxer_init(&s->video_packet_demuxer, "video", s->server.video_socket,
                         &video_demuxer_cbs, NULL);
         s->video_demuxer = &s->video_packet_demuxer.demuxer;
+        }
     }
 
     if (options->audio) {
@@ -539,7 +540,7 @@ scrcpy(struct scrcpy_options *options) {
         }
         recorder_started = true;
 
-        if (options->video || options->sideband_video) {
+        if (options->video) {
             sc_packet_source_add_sink(&s->video_demuxer->packet_source,
                                       &s->recorder.video_packet_sink);
         }
@@ -764,7 +765,7 @@ aoa_hid_end:
     // Now that the header values have been consumed, the socket(s) will
     // receive the stream(s). Start the demuxer(s).
 
-    if (options->video || options->sideband_video) {
+    if (options->video) {
         if (!sc_demuxer_start(s->video_demuxer)) {
             goto end;
         }
