@@ -78,6 +78,7 @@ enum {
     OPT_NO_AUDIO_PLAYBACK,
     OPT_NO_VIDEO_PLAYBACK,
     OPT_VIDEO_SOURCE,
+    OPT_VIDEO_SOURCE_OPTIONS,
     OPT_AUDIO_SOURCE,
     OPT_KILL_ADB_ON_CLOSE,
     OPT_TIME_LIMIT,
@@ -793,6 +794,12 @@ static const struct sc_option options[] = {
                 "Default is display.",
     },
     {
+        .longopt_id = OPT_VIDEO_SOURCE_OPTIONS,
+        .longopt = "video-source-options",
+        .argdesc = "value",
+        .text = "Options to pass to libav when using generic uri as video source"
+    },
+    {
         .shortopt = 'w',
         .longopt = "stay-awake",
         .text = "Keep the device on while scrcpy is running, when the device "
@@ -836,7 +843,7 @@ static const struct sc_option options[] = {
         .argdesc = "value",
         .text = "Set the initial window height.\n"
                 "Default is 0 (automatic).",
-    },
+    }
 };
 
 static const struct sc_shortcut shortcuts[] = {
@@ -1827,7 +1834,8 @@ parse_audio_codec(const char *optarg, enum sc_codec *codec) {
 }
 
 static bool
-parse_video_source(const char *optarg, enum sc_video_source *source) {
+parse_video_source(const char *optarg, enum sc_video_source *source, const char** opt_path) {
+    *opt_path = NULL;
     if (!strcmp(optarg, "display")) {
         *source = SC_VIDEO_SOURCE_DISPLAY;
         return true;
@@ -1838,8 +1846,10 @@ parse_video_source(const char *optarg, enum sc_video_source *source) {
         return true;
     }
 
-    LOGE("Unsupported video source: %s (expected display or camera)", optarg);
-    return false;
+    *source = SC_VIDEO_SOURCE_PATH;
+    *opt_path = optarg; 
+
+    return true;
 }
 
 static bool
@@ -2311,9 +2321,12 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                 }
                 break;
             case OPT_VIDEO_SOURCE:
-                if (!parse_video_source(optarg, &opts->video_source)) {
+                if (!parse_video_source(optarg, &opts->video_source, &opts->video_source_path)) {
                     return false;
                 }
+                break;
+            case OPT_VIDEO_SOURCE_OPTIONS:
+                opts->video_source_options = optarg;
                 break;
             case OPT_AUDIO_SOURCE:
                 if (!parse_audio_source(optarg, &opts->audio_source)) {
@@ -2505,11 +2518,11 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
 
     if (opts->audio && opts->audio_source == SC_AUDIO_SOURCE_AUTO) {
         // Select the audio source according to the video source
-        if (opts->video_source == SC_VIDEO_SOURCE_DISPLAY) {
-            opts->audio_source = SC_AUDIO_SOURCE_OUTPUT;
-        } else {
+        if (opts->video_source == SC_VIDEO_SOURCE_CAMERA) {
             opts->audio_source = SC_AUDIO_SOURCE_MIC;
             LOGI("Camera video source: microphone audio source selected");
+        } else{
+            opts->audio_source = SC_AUDIO_SOURCE_OUTPUT;
         }
     }
 

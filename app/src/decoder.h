@@ -13,7 +13,6 @@
 struct sc_decoder {
     struct sc_packet_sink packet_sink; // packet sink trait
     struct sc_frame_source frame_source; // frame source trait
-
     const char *name; // must be statically allocated (e.g. a string literal)
 
     AVCodecContext *ctx;
